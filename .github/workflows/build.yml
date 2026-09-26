@@ -36,6 +36,13 @@ on:
 permissions:
   contents: write          # the release; nothing else
 
+# Releases are cut whenever a change needs one, even while another is building. They
+# queue here and publish one after another, in the order they were tagged, so two can
+# never race on dl.imanginable.com's manifest. Never cancelled: every tag is published.
+concurrency:
+  group: agent-release
+  cancel-in-progress: false
+
 env:
   SOURCE_REPO: Ikolvi/imanginable
   DL_URL: https://dl.imanginable.com                    # the R2 bucket's custom domain
