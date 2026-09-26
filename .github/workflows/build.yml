@@ -93,9 +93,35 @@ jobs:
       - name: studio UI (the brain inside the agent serves it)
         shell: bash
         run: npm ci --prefix web --no-audit --no-fund > ui.log 2>&1 && python build_ui.py >> ui.log 2>&1 || { tail -30 ui.log; exit 1; }
+      # The compiler cache, kept between releases: a release changes a handful of our
+      # modules, and every other C file (Flask, the Google libraries, cryptography, the
+      # rest of ours) compiles exactly as last time. ccache on Linux/macOS, Nuitka's own
+      # clcache for MSVC on Windows; both live under NUITKA_CACHE_DIR. Saved under a new
+      # key every run (a cache entry is never overwritten) and restored from the newest,
+      # so each release starts from the one before it.
+      - name: ccache (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y -q ccache > /dev/null
+      - name: ccache (macOS)
+        if: runner.os == 'macOS'
+        run: brew install -q ccache
+      - uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.nuitka-cache
+          key: nuitka-${{ matrix.key }}-py${{ env.PYTHON }}-${{ github.run_id }}
+          restore-keys: nuitka-${{ matrix.key }}-py${{ env.PYTHON }}-
       - name: build (Nuitka onefile, quiet)
         shell: bash
+        env:
+          NUITKA_CACHE_DIR: ${{ github.workspace }}/.nuitka-cache
         run: python agent/build/build.py --onefile --out dist --version "${{ needs.meta.outputs.version }}" ${{ matrix.flags }} > build.log 2>&1 || { tail -40 build.log; exit 1; }
+      # Counts only (how many C files were compiled, how many came from the cache) —
+      # never a file name, so the public log still shows no source.
+      - name: cache hits
+        if: always()
+        shell: bash
+        run: |
+          grep -E "Compiled [0-9]+ C files|Cached C files" build.log | sed -E 's/^[^:]*Scons[^:]*: *//' || true
       - name: name by platform
         shell: bash
         run: mkdir out && mv "dist/${{ matrix.exe }}" "out/imanginable-${{ matrix.key }}${{ matrix.suffix }}" && ls -la out
