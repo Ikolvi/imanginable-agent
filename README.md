@@ -58,3 +58,19 @@ static build (GPL-licensed, with its licence text alongside) into its own data
 directory, or uses the one already on your PATH.
 
 Privacy policy: <https://app.imanginable.com/privacy> · Terms: <https://app.imanginable.com/terms>
+
+## DaVinci Resolve and Premiere Pro
+
+The same releases page also carries **Imanginable for DaVinci Resolve and Premiere Pro**
+(tags `editor-v*`): a panel inside the editor that opens your Imanginable films and
+storyboards as timelines and brings your cut back. Install:
+
+```powershell
+irm https://dl.imanginable.com/editor/editor.ps1 | iex
+```
+
+```sh
+curl -fsSL https://dl.imanginable.com/editor/editor.sh | sh
+```
+
+Details: https://editor.imanginable.com/install/

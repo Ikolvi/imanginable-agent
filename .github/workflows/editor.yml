@@ -1,0 +1,125 @@
+# Builds the Imanginable plugins for DaVinci Resolve and Premiere Pro from the PRIVATE
+# source repo and publishes them. Same arrangement as build.yml (the agent): the source is
+# fetched with the read-only deploy key and never leaves the runner; only the packed
+# plugins are uploaded.
+#
+# The plugins are SHELLS — a window/webview showing the panel from
+# https://editor.imanginable.com plus a small fixed set of editor operations — so a
+# release is needed only when that set grows. The panel itself is deployed on its own.
+#
+# Trigger: push a tag `editor-vX.Y.Z` here (the private repo must have `editor-vX.Y.Z`:
+# `python editor/build/release.py X.Y.Z` there makes both), or run it by hand.
+#
+# Where the files go: https://dl.imanginable.com/editor/ (the R2 bucket, fixed names, so
+# each release REPLACES the last — what the installers read) and a GitHub release that is
+# NEVER marked latest: the agent's installers fall back to the latest release, which must
+# stay the agent's.
+#
+# Secrets: SOURCE_DEPLOY_KEY, MINISIGN_SECRET_KEY, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY —
+# the same ones build.yml uses (see there).
+name: editor
+on:
+  push:
+    tags: ["editor-v*"]
+  workflow_dispatch:
+    inputs:
+      version: { description: "version x.y.z", required: true }
+      ref: { description: "private-repo ref to build", default: "main" }
+      publish: { description: "publish it", type: boolean, default: false }
+
+permissions:
+  contents: write          # the release; nothing else
+
+concurrency:
+  group: editor-release    # never two editor publishes at once (the agent's run is separate)
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: Ikolvi/imanginable
+  DL_URL: https://dl.imanginable.com
+  R2_BUCKET: imanginable-agent
+  R2_ACCOUNT_ID: e09b6e290483127c3121bba67095241d
+  PYTHON: "3.14"
+
+jobs:
+  editor:
+    runs-on: ubuntu-26.04
+    steps:
+      - id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/editor-v* ]]; then
+            v="${GITHUB_REF_NAME#editor-v}"; ref="editor-v$v"; publish=true
+          else
+            v="${{ inputs.version }}"; ref="${{ inputs.ref }}"; publish="${{ inputs.publish }}"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"; echo "ref=$ref" >> "$GITHUB_OUTPUT"; echo "publish=$publish" >> "$GITHUB_OUTPUT"
+      - name: the source (editor/ and the signer only)
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ steps.v.outputs.ref }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          sparse-checkout: |
+            editor
+            agent/build/sign.py
+      - uses: actions/setup-python@v7
+        with: { python-version: "${{ env.PYTHON }}" }
+      - uses: actions/setup-node@v7
+        with: { node-version: "24" }
+      - run: pip install -q cryptography
+      - name: the shells' own tests
+        run: node --test editor/tests/ops.test.js
+      - name: pack
+        run: |
+          v="${{ steps.v.outputs.version }}"
+          want="$(tr -d '[:space:]' < editor/VERSION)"
+          if [ "$v" != "$want" ]; then echo "::error::the tag says $v, editor/VERSION says $want"; exit 1; fi
+          python editor/build/pack.py --out out
+      - name: sign the manifest
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          python agent/build/sign.py sign out/editor-manifest.json
+          ls -la out && cat out/editor-manifest.json
+      - uses: actions/upload-artifact@v7
+        with: { name: "imanginable-editor-${{ steps.v.outputs.version }}", path: out/*, if-no-files-found: error }
+      - name: release (never "latest")
+        if: steps.v.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${{ steps.v.outputs.version }}"
+          tag="editor-v$v"
+          notes="Imanginable for DaVinci Resolve and Premiere Pro $v. Install: https://editor.imanginable.com/install/ — every file's sha256 is in editor-manifest.json, which is signed (editor-manifest.json.minisig)."
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "Imanginable for Resolve & Premiere $v" --notes "$notes" --latest=false
+          for f in out/*; do
+            n=0
+            until gh release upload "$tag" "$f" --repo "$GITHUB_REPOSITORY" --clobber; do
+              n=$((n + 1)); if [ "$n" -ge 3 ]; then echo "giving up on $f"; exit 1; fi
+              echo "upload failed ($n), retrying in 15s: $f"; sleep 15
+            done
+          done
+      # Plugins and installers first, the manifest and its signature last, so the manifest
+      # never names a file that is not there yet.
+      - name: publish to dl.imanginable.com/editor (R2)
+        if: steps.v.outputs.publish == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          if [ -z "$AWS_ACCESS_KEY_ID" ]; then echo "::error::R2 secrets not set — $DL_URL/editor was not updated"; exit 1; fi
+          put() {  # put <file> <content-type>
+            aws s3 cp "out/$1" "s3://$R2_BUCKET/editor/$1" --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" \
+              --content-type "$2" --cache-control "public, max-age=300" --only-show-errors
+          }
+          put imanginable-resolve.zip application/zip
+          put imanginable-premiere.ccx application/octet-stream
+          put editor.sh text/plain; put editor.ps1 text/plain
+          put editor-manifest.json.minisig text/plain
+          put editor-manifest.json application/json
+          echo "published to $DL_URL/editor/"
