@@ -80,8 +80,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: windows-latest,   key: windows-x86_64, exe: imanginable.exe, suffix: ".exe" }
-          - { os: windows-latest,   key: windows-x86_64-noconsole, exe: imanginablew.exe, suffix: ".exe", flags: "--no-console" }   # the logon task's windowless twin
+          # cc: the compiler, in the cache key — Windows builds with clang-cl (agent/build/build.py)
+          - { os: windows-latest,   key: windows-x86_64, exe: imanginable.exe, suffix: ".exe", cc: "-clang" }
+          - { os: windows-latest,   key: windows-x86_64-noconsole, exe: imanginablew.exe, suffix: ".exe", flags: "--no-console", cc: "-clang" }   # the logon task's windowless twin
           - { os: ubuntu-24.04,     key: linux-x86_64,   exe: imanginable,     suffix: "" }   # glibc ≥ 2.39: Ubuntu 24.04+, Debian 13+, Fedora 40+ (22.04 images cannot build Python 3.14 onefiles, see PYTHON)
           - { os: ubuntu-24.04-arm, key: linux-arm64,    exe: imanginable,     suffix: "" }   # Pi 4/5, ARM servers
           # The Linux rows are NOT on 26.04, deliberately: a binary needs at least the glibc
@@ -110,7 +111,7 @@ jobs:
       # The compiler cache, kept between releases: a release changes a handful of our
       # modules, and every other C file (Flask, the Google libraries, cryptography, the
       # rest of ours) compiles exactly as last time. ccache on Linux/macOS, Nuitka's own
-      # clcache for MSVC on Windows; both live under NUITKA_CACHE_DIR. Saved under a new
+      # clcache (for clang-cl) on Windows; both live under NUITKA_CACHE_DIR. Saved under a new
       # key every run (a cache entry is never overwritten) and restored from the newest,
       # so each release starts from the one before it.
       - name: ccache (Linux)
@@ -122,8 +123,8 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/.nuitka-cache
-          key: nuitka-${{ matrix.key }}-py${{ env.PYTHON }}-${{ github.run_id }}
-          restore-keys: nuitka-${{ matrix.key }}-py${{ env.PYTHON }}-
+          key: nuitka-${{ matrix.key }}${{ matrix.cc }}-py${{ env.PYTHON }}-${{ github.run_id }}
+          restore-keys: nuitka-${{ matrix.key }}${{ matrix.cc }}-py${{ env.PYTHON }}-
       - name: build (Nuitka onefile, quiet)
         shell: bash
         env:
