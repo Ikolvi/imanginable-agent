@@ -106,6 +106,10 @@ jobs:
       # clcache for MSVC on Windows; both live under NUITKA_CACHE_DIR. Saved under a new
       # key every run (a cache entry is never overwritten) and restored from the newest,
       # so each release starts from the one before it.
+      - name: Defender real-time scanning (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled, AntivirusEnabled | Format-List
       - name: ccache (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get install -y -q ccache > /dev/null
@@ -121,14 +125,23 @@ jobs:
         shell: bash
         env:
           NUITKA_CACHE_DIR: ${{ github.workspace }}/.nuitka-cache
-        run: python agent/build/build.py --onefile --out dist --version "${{ needs.meta.outputs.version }}" ${{ matrix.flags }} > build.log 2>&1 || { tail -40 build.log; exit 1; }
-      # Counts only (how many C files were compiled, how many came from the cache) —
-      # never a file name, so the public log still shows no source.
-      - name: cache hits
+        # Every line is stamped with the seconds since the build started, so the step
+        # below can say which phase the time went to.
+        run: |
+          python -u agent/build/build.py --onefile --out dist --version "${{ needs.meta.outputs.version }}" ${{ matrix.flags }} 2>&1 \
+            | python -u -c "import sys,time; t=time.time(); [sys.stdout.write('[%5ds] %s' % (time.time()-t, l)) for l in sys.stdin]" > build.log \
+            || { tail -40 build.log; exit 1; }
+      # Counts and phase times only (how many C files were compiled, how many came from
+      # the cache, when each Nuitka phase started) — anything quoted is masked and no
+      # other line is printed, so the public log still shows no file or module name.
+      - name: cache hits + phase times
         if: always()
         shell: bash
         run: |
           grep -E "Compiled [0-9]+ C files|Cached C files" build.log | sed -E 's/^[^:]*Scons[^:]*: *//' || true
+          grep -E "Starting Python compilation|Completed Python level|Generating source code|Running data composer|Running C compilation|Compiled [0-9]+ C files|Creating single file|Running bootstrap binary|Using compression|Successfully created|Removing (build directory|dist folder)" build.log \
+            | sed -E "s/'[^']*'/'…'/g" || true
+          tail -1 build.log | grep -oE '^\[ *[0-9]+s\]' | sed 's/^/finished at /' || true
       - name: name by platform
         shell: bash
         run: mkdir out && mv "dist/${{ matrix.exe }}" "out/imanginable-${{ matrix.key }}${{ matrix.suffix }}" && ls -la out
