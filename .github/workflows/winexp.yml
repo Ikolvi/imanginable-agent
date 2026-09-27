@@ -1,0 +1,60 @@
+# TEMPORARY: a clang-built Windows agent, uploaded to be run on a real PC. Removed after.
+# Each variant builds twice in a row: the first pass is a release's case (mostly
+# cached), the second is fully cached (what's left is cache lookups + link + onefile).
+# Quiet like build.yml: only phase lines, anything quoted masked.
+name: winexp
+on:
+  workflow_dispatch:
+    inputs:
+      ref: { description: "private-repo ref", default: "main" }
+
+permissions:
+  contents: read
+
+jobs:
+  exp:
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [clang]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: Ikolvi/imanginable
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with: { python-version: "3.14" }
+      - run: pip install -q -r agent/requirements-agent.txt nuitka ordered-set zstandard
+      - uses: actions/setup-node@v7
+        with: { node-version: "24" }
+      - shell: bash
+        run: npm ci --prefix web --no-audit --no-fund > ui.log 2>&1 && python build_ui.py >> ui.log 2>&1 || { tail -30 ui.log; exit 1; }
+      - if: matrix.compiler == 'msvc'
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ github.workspace }}/.nuitka-cache
+          key: nuitka-windows-x86_64-py3.14-none
+          restore-keys: nuitka-windows-x86_64-py3.14-
+      - name: build twice
+        shell: bash
+        env:
+          NUITKA_CACHE_DIR: ${{ github.workspace }}/.nuitka-cache
+        run: |
+          if [ "${{ matrix.compiler }}" != msvc ]; then
+            sed -i 's/"--lto=no",/"--lto=no", "--${{ matrix.compiler }}",/' agent/build/build.py
+          fi
+          grep -c -- '--${{ matrix.compiler }}' agent/build/build.py || true
+          for pass in 1 2; do
+            rm -rf dist
+            python -u agent/build/build.py --onefile --out dist --version 0.0.0 2>&1 \
+              | python -u -c "import sys,time; t=time.time(); [sys.stdout.write('[%5ds] %s' % (time.time()-t, l)) for l in sys.stdin]" > build$pass.log \
+              || { echo "pass $pass failed"; tail -5 build$pass.log | sed -E "s/'[^']*'/'…'/g" | cut -c1-160; exit 1; }
+            echo "== ${{ matrix.compiler }} pass $pass"
+            grep -E "Starting Python compilation|Completed Python level|Running C compilation|Compiled [0-9]+ C files|Cached C files|Creating single file|Successfully created" build$pass.log | sed -E "s/'[^']*'/'…'/g"
+            ls -la dist/*.exe | awk '{print $5, "bytes"}'
+          done
+      - uses: actions/upload-artifact@v7
+        with: { name: "winexp-${{ matrix.compiler }}", path: dist/imanginable.exe, if-no-files-found: error, retention-days: 3 }
