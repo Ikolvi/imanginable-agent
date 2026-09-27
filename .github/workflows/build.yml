@@ -80,9 +80,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # cc: the compiler, in the cache key — Windows builds with zig (agent/build/build.py)
-          - { os: windows-latest,   key: windows-x86_64, exe: imanginable.exe, suffix: ".exe", cc: "-zig" }
-          - { os: windows-latest,   key: windows-x86_64-noconsole, exe: imanginablew.exe, suffix: ".exe", flags: "--no-console", cc: "-zig" }   # the logon task's windowless twin
+          - { os: windows-latest,   key: windows-x86_64, exe: imanginable.exe, suffix: ".exe" }
+          - { os: windows-latest,   key: windows-x86_64-noconsole, exe: imanginablew.exe, suffix: ".exe", flags: "--no-console" }   # the logon task's windowless twin
           - { os: ubuntu-24.04,     key: linux-x86_64,   exe: imanginable,     suffix: "" }   # glibc ≥ 2.39: Ubuntu 24.04+, Debian 13+, Fedora 40+ (22.04 images cannot build Python 3.14 onefiles, see PYTHON)
           - { os: ubuntu-24.04-arm, key: linux-arm64,    exe: imanginable,     suffix: "" }   # Pi 4/5, ARM servers
           # The Linux rows are NOT on 26.04, deliberately: a binary needs at least the glibc
@@ -110,8 +109,8 @@ jobs:
         run: npm ci --prefix web --no-audit --no-fund > ui.log 2>&1 && python build_ui.py >> ui.log 2>&1 || { tail -30 ui.log; exit 1; }
       # The compiler cache, kept between releases: a release changes a handful of our
       # modules, and every other C file (Flask, the Google libraries, cryptography, the
-      # rest of ours) compiles exactly as last time. ccache on Linux/macOS, zig's own cache
-      # on Windows; both live under NUITKA_CACHE_DIR. Saved under a new
+      # rest of ours) compiles exactly as last time. ccache on Linux/macOS, Nuitka's own
+      # clcache for MSVC on Windows; both live under NUITKA_CACHE_DIR. Saved under a new
       # key every run (a cache entry is never overwritten) and restored from the newest,
       # so each release starts from the one before it.
       - name: ccache (Linux)
@@ -123,8 +122,8 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/.nuitka-cache
-          key: nuitka-${{ matrix.key }}${{ matrix.cc }}-py${{ env.PYTHON }}-${{ github.run_id }}
-          restore-keys: nuitka-${{ matrix.key }}${{ matrix.cc }}-py${{ env.PYTHON }}-
+          key: nuitka-${{ matrix.key }}-py${{ env.PYTHON }}-${{ github.run_id }}
+          restore-keys: nuitka-${{ matrix.key }}-py${{ env.PYTHON }}-
       - name: build (Nuitka onefile, quiet)
         shell: bash
         env:
@@ -150,7 +149,9 @@ jobs:
         shell: bash
         run: mkdir out && mv "dist/${{ matrix.exe }}" "out/imanginable-${{ matrix.key }}${{ matrix.suffix }}" && ls -la out
       # The binary starts on the runner: its CLI parses and it reads its own state
-      # (`status` exits 0 unpaired). The windowless twin may print nothing, so only the
+      # (`status` exits 0 unpaired). Only on the runner's CPU: a zig build passed this and
+      # still died with "Illegal instruction" on a real PC, so a new compiler or flag is
+      # tried on one before it ships. The windowless twin may print nothing, so only the
       # console builds are held to their output.
       - name: smoke test
         shell: bash
