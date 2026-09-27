@@ -4,9 +4,13 @@
 # but the compiled binaries is uploaded, and the build runs quietly so the public log
 # shows no source.
 #
-# Trigger: push a tag `vX.Y.Z` here (the private repo must have `agent-vX.Y.Z`), or
-# run it by hand with a version + ref. Pull requests never run it (no trigger, no
-# secrets for forks).
+# Trigger: the source repo's agent/build/release.py runs it on main with a version, the
+# private-repo ref `agent-vX.Y.Z` and publish=true; the publish job makes the tag
+# `vX.Y.Z` here. It runs on main, not on a pushed tag, because a run's caches belong to
+# its ref and a tag's run reads only its own and main's: from tags, every release would
+# save its compiler cache where no later one looks. A pushed tag `vX.Y.Z` still builds
+# and publishes (from main's cache, never saving a useful one). Pull requests never run
+# it (no trigger, no secrets for forks).
 #
 # Secrets (Settings → Secrets and variables → Actions):
 #   SOURCE_DEPLOY_KEY     private half of a READ-ONLY deploy key registered on
@@ -24,6 +28,7 @@
 # storage took a minute to answer from some networks. Cache-Control max-age=300 on the
 # objects means a new release shows up at the edge within five minutes.
 name: build
+run-name: agent ${{ inputs.version || github.ref_name }}${{ (github.event_name == 'workflow_dispatch' && !inputs.publish) && ' (test, not published)' || '' }}
 on:
   push:
     tags: ["v*"]
@@ -75,8 +80,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: windows-latest,   key: windows-x86_64, exe: imanginable.exe, suffix: ".exe" }
-          - { os: windows-latest,   key: windows-x86_64-noconsole, exe: imanginablew.exe, suffix: ".exe", flags: "--no-console" }   # the logon task's windowless twin
+          # cc: the compiler, in the cache key — Windows builds with zig (agent/build/build.py)
+          - { os: windows-latest,   key: windows-x86_64, exe: imanginable.exe, suffix: ".exe", cc: "-zig" }
+          - { os: windows-latest,   key: windows-x86_64-noconsole, exe: imanginablew.exe, suffix: ".exe", flags: "--no-console", cc: "-zig" }   # the logon task's windowless twin
           - { os: ubuntu-24.04,     key: linux-x86_64,   exe: imanginable,     suffix: "" }   # glibc ≥ 2.39: Ubuntu 24.04+, Debian 13+, Fedora 40+ (22.04 images cannot build Python 3.14 onefiles, see PYTHON)
           - { os: ubuntu-24.04-arm, key: linux-arm64,    exe: imanginable,     suffix: "" }   # Pi 4/5, ARM servers
           # The Linux rows are NOT on 26.04, deliberately: a binary needs at least the glibc
@@ -92,24 +98,22 @@ jobs:
           ref: ${{ needs.meta.outputs.ref }}
           ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
           persist-credentials: false
+      # pip's and npm's download caches (not the installs): the wheels and packages come
+      # from the runner's cache instead of the network, most noticeable on Windows.
       - uses: actions/setup-python@v7
-        with: { python-version: "${{ env.PYTHON }}" }
+        with: { python-version: "${{ env.PYTHON }}", cache: pip, cache-dependency-path: agent/requirements-agent.txt }
       - run: pip install -q -r agent/requirements-agent.txt nuitka ordered-set zstandard
       - uses: actions/setup-node@v7
-        with: { node-version: "24" }
+        with: { node-version: "24", cache: npm, cache-dependency-path: web/package-lock.json }
       - name: studio UI (the brain inside the agent serves it)
         shell: bash
         run: npm ci --prefix web --no-audit --no-fund > ui.log 2>&1 && python build_ui.py >> ui.log 2>&1 || { tail -30 ui.log; exit 1; }
       # The compiler cache, kept between releases: a release changes a handful of our
       # modules, and every other C file (Flask, the Google libraries, cryptography, the
-      # rest of ours) compiles exactly as last time. ccache on Linux/macOS, Nuitka's own
-      # clcache for MSVC on Windows; both live under NUITKA_CACHE_DIR. Saved under a new
+      # rest of ours) compiles exactly as last time. ccache on Linux/macOS, zig's own cache
+      # on Windows; both live under NUITKA_CACHE_DIR. Saved under a new
       # key every run (a cache entry is never overwritten) and restored from the newest,
       # so each release starts from the one before it.
-      - name: Defender real-time scanning (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled, AntivirusEnabled | Format-List
       - name: ccache (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get install -y -q ccache > /dev/null
@@ -119,8 +123,8 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/.nuitka-cache
-          key: nuitka-${{ matrix.key }}-py${{ env.PYTHON }}-${{ github.run_id }}
-          restore-keys: nuitka-${{ matrix.key }}-py${{ env.PYTHON }}-
+          key: nuitka-${{ matrix.key }}${{ matrix.cc }}-py${{ env.PYTHON }}-${{ github.run_id }}
+          restore-keys: nuitka-${{ matrix.key }}${{ matrix.cc }}-py${{ env.PYTHON }}-
       - name: build (Nuitka onefile, quiet)
         shell: bash
         env:
@@ -145,6 +149,17 @@ jobs:
       - name: name by platform
         shell: bash
         run: mkdir out && mv "dist/${{ matrix.exe }}" "out/imanginable-${{ matrix.key }}${{ matrix.suffix }}" && ls -la out
+      # The binary starts on the runner: its CLI parses and it reads its own state
+      # (`status` exits 0 unpaired). The windowless twin may print nothing, so only the
+      # console builds are held to their output.
+      - name: smoke test
+        shell: bash
+        run: |
+          b="./out/imanginable-${{ matrix.key }}${{ matrix.suffix }}"
+          "$b" --version
+          out=$("$b" status 2>&1)
+          if [ -z "${{ matrix.flags }}" ]; then echo "$out" | grep -q "(compiled)"; fi
+          echo "smoke test passed"
       - uses: actions/upload-artifact@v7
         with: { name: "imanginable-${{ matrix.key }}", path: out/*, if-no-files-found: error }
 
