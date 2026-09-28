@@ -37,9 +37,11 @@ on:
       version: { description: "version x.y.z", required: true }
       ref: { description: "private-repo ref to build", default: "main" }
       publish: { description: "create the release", type: boolean, default: false }
+      archive: { description: "onefile as archive (per-file compression, cached) - try the exe on a real PC first", type: boolean, default: false }
 
 permissions:
-  contents: write          # the release; nothing else
+  contents: write          # the release
+  actions: write           # the build rows wait for the ui job's artifact; it is deleted after
 
 # Releases are cut whenever a change needs one, even while another is building. They
 # queue here and publish one after another, in the order they were tagged, so two can
@@ -74,6 +76,28 @@ jobs:
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"; echo "ref=$ref" >> "$GITHUB_OUTPUT"; echo "publish=$publish" >> "$GITHUB_OUTPUT"
 
+  # The studio UI, built once and shared: the same static files on every platform (the
+  # bundle app.imanginable.com serves anyway; no source maps). It runs BESIDE the build
+  # rows, not before them: each row waits for it only once its own setup is done.
+  ui:
+    needs: meta
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ needs.meta.outputs.ref }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with: { python-version: "${{ env.PYTHON }}" }
+      - uses: actions/setup-node@v7
+        with: { node-version: "24", cache: npm, cache-dependency-path: web/package-lock.json }
+      - name: studio UI
+        run: npm ci --prefix web --no-audit --no-fund > ui.log 2>&1 && python build_ui.py >> ui.log 2>&1 || { tail -30 ui.log; exit 1; }
+      - uses: actions/upload-artifact@v7
+        with: { name: ui, path: web/out, retention-days: 1, if-no-files-found: error, include-hidden-files: true }
+
   build:
     needs: meta
     strategy:
@@ -91,6 +115,12 @@ jobs:
           - { os: macos-14,         key: darwin-arm64,   exe: imanginable,     suffix: "" }   # Apple Silicon (every Mac since 2020)
     runs-on: ${{ matrix.os }}
     steps:
+      # The runner's own antivirus scans every file Nuitka and clcache write and read,
+      # thousands of small ones. A throwaway VM; the binary is not touched by this.
+      - name: real-time scanning off (Windows runner)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
       - name: source (private, read-only token)
         uses: actions/checkout@v7
         with:
@@ -103,11 +133,6 @@ jobs:
       - uses: actions/setup-python@v7
         with: { python-version: "${{ env.PYTHON }}", cache: pip, cache-dependency-path: agent/requirements-agent.txt }
       - run: pip install -q -r agent/requirements-agent.txt nuitka ordered-set zstandard
-      - uses: actions/setup-node@v7
-        with: { node-version: "24", cache: npm, cache-dependency-path: web/package-lock.json }
-      - name: studio UI (the brain inside the agent serves it)
-        shell: bash
-        run: npm ci --prefix web --no-audit --no-fund > ui.log 2>&1 && python build_ui.py >> ui.log 2>&1 || { tail -30 ui.log; exit 1; }
       # The compiler cache, kept between releases: a release changes a handful of our
       # modules, and every other C file (Flask, the Google libraries, cryptography, the
       # rest of ours) compiles exactly as last time. ccache on Linux/macOS, Nuitka's own
@@ -125,6 +150,21 @@ jobs:
           path: ${{ github.workspace }}/.nuitka-cache
           key: nuitka-${{ matrix.key }}${{ matrix.cc }}-py${{ env.PYTHON }}-${{ github.run_id }}
           restore-keys: nuitka-${{ matrix.key }}${{ matrix.cc }}-py${{ env.PYTHON }}-
+      # The studio UI (the brain inside the agent serves it), from the ui job: waited for
+      # here, after this row's own setup, so the two ran at the same time.
+      - name: studio UI (from the ui job)
+        shell: bash
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          api="repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          for i in $(seq 1 120); do
+            [ "$(gh api "$api/artifacts" --jq '[.artifacts[] | select(.name == "ui")] | length')" = "1" ] && exit 0
+            [ "$(gh api "$api/jobs" --jq '[.jobs[] | select(.name == "ui" and .conclusion == "failure")] | length')" = "1" ] && { echo "the ui job failed"; exit 1; }
+            sleep 5
+          done
+          echo "no ui artifact after 10 min"; exit 1
+      - uses: actions/download-artifact@v8
+        with: { name: ui, path: web/out }
       - name: build (Nuitka onefile, quiet)
         shell: bash
         env:
@@ -132,7 +172,7 @@ jobs:
         # Every line is stamped with the seconds since the build started, so the step
         # below can say which phase the time went to.
         run: |
-          python -u agent/build/build.py --onefile --out dist --version "${{ needs.meta.outputs.version }}" ${{ matrix.flags }} 2>&1 \
+          python -u agent/build/build.py --onefile --out dist --version "${{ needs.meta.outputs.version }}" ${{ matrix.flags }} ${{ inputs.archive && '--archive' || '' }} 2>&1 \
             | python -u -c "import sys,time; t=time.time(); [sys.stdout.write('[%5ds] %s' % (time.time()-t, l)) for l in sys.stdin]" > build.log \
             || { tail -40 build.log; exit 1; }
       # Counts and phase times only (how many C files were compiled, how many came from
@@ -164,6 +204,18 @@ jobs:
           echo "smoke test passed"
       - uses: actions/upload-artifact@v7
         with: { name: "imanginable-${{ matrix.key }}", path: out/*, if-no-files-found: error }
+
+  # The ui job's artifact was only for the build rows: gone once they are done.
+  ui-cleanup:
+    needs: [ui, build]
+    if: always()
+    runs-on: ubuntu-26.04
+    steps:
+      - env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          for id in $(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[] | select(.name == "ui") | .id'); do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
+          done
 
   publish:
     needs: [meta, build]
