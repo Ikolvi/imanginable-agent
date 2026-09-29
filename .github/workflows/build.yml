@@ -233,8 +233,10 @@ jobs:
       - uses: actions/setup-python@v7
         with: { python-version: "${{ env.PYTHON }}" }
       - run: pip install -q cryptography
+      # Only the binaries: the ui artifact may still exist (ui-cleanup runs beside this
+      # job), and its files in builds/ broke the upload loop on a first run.
       - uses: actions/download-artifact@v8
-        with: { path: builds, merge-multiple: true }
+        with: { path: builds, pattern: "imanginable-*", merge-multiple: true }
       - name: manifest + signature
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
