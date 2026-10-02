@@ -97,6 +97,28 @@ jobs:
         run: npm ci --prefix web --no-audit --no-fund > ui.log 2>&1 && python build_ui.py >> ui.log 2>&1 || { tail -30 ui.log; exit 1; }
       - uses: actions/upload-artifact@v7
         with: { name: ui, path: web/out, retention-days: 1, if-no-files-found: error, include-hidden-files: true }
+      # Session replays (Clarity) fetch a page's stylesheets themselves, signed out. A
+      # studio page comes from the person's own agent, whose content-hashed files the box
+      # does not have, so the box sends a signed-out request for one to
+      # dl.imanginable.com/ui/_next/static/... — copied here: styles, fonts and pictures
+      # only, NEVER the scripts. Added beside every earlier release's (hashed names never
+      # clash, and an older agent's replays keep their styles), so no --delete.
+      - name: studio styles to dl.imanginable.com/ui (R2)
+        if: needs.meta.outputs.publish == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          if [ -z "$AWS_ACCESS_KEY_ID" ]; then echo "::warning::R2 secrets not set — studio styles not copied"; exit 0; fi
+          aws s3 sync web/out/_next/static "s3://$R2_BUCKET/ui/_next/static" \
+            --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" \
+            --exclude "*" --include "*.css" --include "*.woff2" --include "*.woff" --include "*.ttf" \
+            --include "*.png" --include "*.jpg" --include "*.svg" --include "*.webp" --include "*.ico" \
+            --cache-control "public, max-age=31536000, immutable" --size-only --only-show-errors
+          echo "studio styles copied: $(find web/out/_next/static -type f \( -name '*.css' -o -name '*.woff*' -o -name '*.png' \) | wc -l) files"
 
   build:
     needs: meta
