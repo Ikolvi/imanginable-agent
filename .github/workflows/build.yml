@@ -134,8 +134,13 @@ jobs:
           # The Linux rows are NOT on 26.04, deliberately: a binary needs at least the glibc
           # of the image it was built on, and 26.04's would stop it starting on Ubuntu 24.04,
           # Debian 13 and Raspberry Pi OS. Move them only when those are no longer targets.
-          - { os: macos-14,         key: darwin-arm64,   exe: imanginable,     suffix: "" }   # Apple Silicon (every Mac since 2020)
+          # The newest macOS image (macos-14 is deprecated and its runs fail). What a Mac
+          # needs is pinned by MACOSX_DEPLOYMENT_TARGET below, not by the image: built on
+          # 26 with no target, the binary would refuse to start on anything older.
+          - { os: macos-26,         key: darwin-arm64,   exe: imanginable,     suffix: "", mac_min: "11.0" }   # Apple Silicon (every Mac since 2020, which shipped with macOS 11)
     runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.mac_min }}   # empty, and ignored, off macOS
     steps:
       # The runner's own antivirus scans every file Nuitka and clcache write and read,
       # thousands of small ones. A throwaway VM; the binary is not touched by this.
