@@ -157,8 +157,14 @@ jobs:
           persist-credentials: false
       # pip's and npm's download caches (not the installs): the wheels and packages come
       # from the runner's cache instead of the network, most noticeable on Windows.
+      # check-latest: the newest 3.14.x every time, not whichever one the runner image
+      # has in its toolcache. GitHub rolls a new image out over days, so one release can
+      # land on 3.14.7 and the next on 3.14.8 — and every compiled file depends on
+      # Python's headers, so a cache from the other patch release hits nothing (913 of
+      # 913 files rebuilt, ~15 min instead of ~4).
       - uses: actions/setup-python@v7
-        with: { python-version: "${{ env.PYTHON }}", cache: pip, cache-dependency-path: agent/requirements-agent.txt }
+        id: py
+        with: { python-version: "${{ env.PYTHON }}", check-latest: true, cache: pip, cache-dependency-path: agent/requirements-agent.txt }
       - run: pip install -q -r agent/requirements-agent.txt nuitka ordered-set zstandard
       # The compiler cache, kept between releases: a release changes a handful of our
       # modules, and every other C file (Flask, the Google libraries, cryptography, the
@@ -175,8 +181,11 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/.nuitka-cache
-          key: nuitka-${{ matrix.key }}${{ matrix.cc }}-py${{ env.PYTHON }}-${{ github.run_id }}
-          restore-keys: nuitka-${{ matrix.key }}${{ matrix.cc }}-py${{ env.PYTHON }}-
+          # The EXACT Python in the key: a cache is only restored onto the patch release
+          # it was compiled against. After a Python update the first build of each
+          # platform compiles everything once; every build after it hits again.
+          key: nuitka-${{ matrix.key }}${{ matrix.cc }}-py${{ steps.py.outputs.python-version }}-${{ github.run_id }}
+          restore-keys: nuitka-${{ matrix.key }}${{ matrix.cc }}-py${{ steps.py.outputs.python-version }}-
       # The studio UI (the brain inside the agent serves it), from the ui job: waited for
       # here, after this row's own setup, so the two ran at the same time.
       - name: studio UI (from the ui job)
