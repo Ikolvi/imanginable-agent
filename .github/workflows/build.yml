@@ -38,6 +38,7 @@ on:
       ref: { description: "private-repo ref to build", default: "main" }
       publish: { description: "create the release", type: boolean, default: false }
       archive: { description: "onefile as archive (per-file compression, cached) - try the exe on a real PC first", type: boolean, default: false }
+      diag: { description: "compiler-cache diagnosis on the linux-x86_64 row: which part of ccache's input changed since the last diag run (counts only)", type: boolean, default: false }
 
 permissions:
   contents: write          # the release
@@ -165,7 +166,11 @@ jobs:
       - uses: actions/setup-python@v7
         id: py
         with: { python-version: "${{ env.PYTHON }}", check-latest: true, cache: pip, cache-dependency-path: agent/requirements-agent.txt }
-      - run: pip install -q -r agent/requirements-agent.txt nuitka ordered-set zstandard
+      # Nuitka PINNED: every C file it generates depends on its version, so a new Nuitka
+      # release (4.3 on 10 Oct, 4.3.1 on 17 Oct 2026) silently made the next build of every
+      # platform compile everything (~15 min more). Raise it on purpose, in a release of
+      # its own, and expect that one build to be slow.
+      - run: pip install -q -r agent/requirements-agent.txt nuitka==4.3.1 ordered-set zstandard
       # The compiler cache, kept between releases: a release changes a handful of our
       # modules, and every other C file (Flask, the Google libraries, cryptography, the
       # rest of ours) compiles exactly as last time. ccache on Linux/macOS, Nuitka's own
@@ -205,9 +210,11 @@ jobs:
         shell: bash
         env:
           NUITKA_CACHE_DIR: ${{ github.workspace }}/.nuitka-cache
+          DIAG: ${{ (inputs.diag && matrix.key == 'linux-x86_64') && '1' || '' }}
         # Every line is stamped with the seconds since the build started, so the step
         # below can say which phase the time went to.
         run: |
+          if [ -n "$DIAG" ]; then export CCACHE_DEBUG=1 CCACHE_DEBUGDIR="$GITHUB_WORKSPACE/ccdbg"; fi
           python -u agent/build/build.py --onefile --out dist --version "${{ needs.meta.outputs.version }}" ${{ matrix.flags }} ${{ inputs.archive && '--archive' || '' }} 2>&1 \
             | python -u -c "import sys,time; t=time.time(); [sys.stdout.write('[%5ds] %s' % (time.time()-t, l)) for l in sys.stdin]" > build.log \
             || { tail -40 build.log; exit 1; }
@@ -222,6 +229,44 @@ jobs:
           grep -E "Starting Python compilation|Completed Python level|Generating source code|Running data composer|Running C compilation|Compiled [0-9]+ C files|Creating single file|Running bootstrap binary|Using compression|Successfully created|Removing (build directory|dist folder)" build.log \
             | sed -E "s/'[^']*'/'…'/g" || true
           tail -1 build.log | grep -oE '^\[ *[0-9]+s\]' | sed 's/^/finished at /' || true
+      # Why a build missed the compiler cache: ccache's debug input of every compile, one
+      # hash per section ("### cwd", "### preprocessed", ...), kept in the cache dir and
+      # compared with the last diag run's. Prints section labels and counts only, never a
+      # file name or content, so the public log still shows no source.
+      - name: compiler-cache diagnosis
+        if: always() && inputs.diag && matrix.key == 'linux-x86_64'
+        shell: bash
+        run: |
+          python - <<'EOF'
+          import glob, hashlib, json, os, re
+          new = {}
+          for f in glob.glob("ccdbg/**/*.ccache-input-text", recursive=True):
+              obj = re.sub(r"\.\d+[-_.\d]*\.ccache-input-text$|\.ccache-input-text$", "", os.path.basename(f))
+              secs, cur = {}, "(head)"
+              for line in open(f, "rb").read().split(b"\n"):
+                  if line.startswith(b"### "):
+                      cur = re.sub(r"[/'\"].*", "…", line[4:].decode("utf-8", "replace")).strip()
+                      secs.setdefault(cur, hashlib.sha256())
+                  else:
+                      secs.setdefault(cur, hashlib.sha256()).update(line + b"\n")
+              new[obj] = {k: h.hexdigest() for k, h in secs.items()}
+          print("compiles traced:", len(new))
+          path = ".nuitka-cache/ccdiag.json"
+          if os.path.exists(path):
+              old = json.load(open(path))
+              both = [o for o in new if o in old]
+              print("traced in both runs:", len(both))
+              counts = {}
+              for o in both:
+                  for k in set(new[o]) | set(old[o]):
+                      if new[o].get(k) != old[o].get(k):
+                          counts[k] = counts.get(k, 0) + 1
+              for k, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+                  print("  section %-40s changed in %d" % (k[:40], n))
+          else:
+              print("no earlier diag run in the cache: this one is the baseline")
+          json.dump(new, open(path, "w"))
+          EOF
       - name: name by platform
         shell: bash
         run: mkdir out && mv "dist/${{ matrix.exe }}" "out/imanginable-${{ matrix.key }}${{ matrix.suffix }}" && ls -la out
