@@ -38,7 +38,6 @@ on:
       ref: { description: "private-repo ref to build", default: "main" }
       publish: { description: "create the release", type: boolean, default: false }
       archive: { description: "onefile as archive (per-file compression, cached) - try the exe on a real PC first", type: boolean, default: false }
-      diag: { description: "compiler-cache diagnosis on the linux-x86_64 row: which part of ccache's input changed since the last diag run (counts only)", type: boolean, default: false }
 
 permissions:
   contents: write          # the release
@@ -210,7 +209,7 @@ jobs:
         shell: bash
         env:
           NUITKA_CACHE_DIR: ${{ github.workspace }}/.nuitka-cache
-          DIAG: ${{ (inputs.diag && matrix.key == 'linux-x86_64') && '1' || '' }}
+          DIAG: ${{ matrix.key == 'linux-x86_64' && '1' || '' }}
         # Every line is stamped with the seconds since the build started, so the step
         # below can say which phase the time went to.
         run: |
@@ -229,12 +228,16 @@ jobs:
           grep -E "Starting Python compilation|Completed Python level|Generating source code|Running data composer|Running C compilation|Compiled [0-9]+ C files|Creating single file|Running bootstrap binary|Using compression|Successfully created|Removing (build directory|dist folder)" build.log \
             | sed -E "s/'[^']*'/'…'/g" || true
           tail -1 build.log | grep -oE '^\[ *[0-9]+s\]' | sed 's/^/finished at /' || true
-      # Why a build missed the compiler cache: ccache's debug input of every compile, one
-      # hash per section ("### cwd", "### preprocessed", ...), kept in the cache dir and
-      # compared with the last diag run's. Prints section labels and counts only, never a
-      # file name or content, so the public log still shows no source.
+      # Why a build missed the compiler cache. Some releases compiled every file again on
+      # every platform (~15 min more) although a rebuild of the same release, or the same
+      # pair of releases built again, hit the cache; the cause is not known yet. On the
+      # linux-x86_64 row (one row is enough: all platforms miss together), ccache's debug
+      # input of every compile is hashed per section ("### cwd", "### arg", "### cpp",
+      # ...), kept in the cache dir and compared with the previous build's. Costs no
+      # measurable time. Prints section labels and counts only, never a file name or
+      # content, so the public log still shows no source.
       - name: compiler-cache diagnosis
-        if: always() && inputs.diag && matrix.key == 'linux-x86_64'
+        if: always() && matrix.key == 'linux-x86_64'
         shell: bash
         run: |
           python - <<'EOF'
