@@ -165,11 +165,12 @@ jobs:
       - uses: actions/setup-python@v7
         id: py
         with: { python-version: "${{ env.PYTHON }}", check-latest: true, cache: pip, cache-dependency-path: agent/requirements-agent.txt }
-      # Nuitka PINNED: every C file it generates depends on its version, so a new Nuitka
-      # release (4.3 on 10 Oct, 4.3.1 on 17 Oct 2026) silently made the next build of every
-      # platform compile everything (~15 min more). Raise it on purpose, in a release of
-      # its own, and expect that one build to be slow.
-      - run: pip install -q -r agent/requirements-agent.txt nuitka==4.3.1 ordered-set zstandard
+      # Always the NEWEST Nuitka and the newest of every dependency (--upgrade): the
+      # agent is built with current tools, every release. Every C file Nuitka generates
+      # depends on its version, so the first build after a Nuitka release compiles
+      # everything once (~15 min more) — accepted; the builds after it hit the cache again.
+      - run: pip install -q --upgrade -r agent/requirements-agent.txt nuitka ordered-set zstandard
+      - run: python -m nuitka --version
       # The compiler cache, kept between releases: a release changes a handful of our
       # modules, and every other C file (Flask, the Google libraries, cryptography, the
       # rest of ours) compiles exactly as last time. ccache on Linux/macOS, Nuitka's own
