@@ -128,7 +128,9 @@ jobs:
         include:
           # cc: the compiler, in the cache key — Windows builds with clang-cl (agent/build/build.py)
           - { os: windows-latest,   key: windows-x86_64, exe: imanginable.exe, suffix: ".exe", cc: "-clang" }
-          - { os: windows-latest,   key: windows-x86_64-noconsole, exe: imanginablew.exe, suffix: ".exe", flags: "--no-console", cc: "-clang" }   # the logon task's windowless twin
+          # The windowless twin (imanginablew.exe) is not built since 0.4.250: it was for the
+          # logon task, and the agent never starts itself at login. Uncomment to bring it back.
+          # - { os: windows-latest,   key: windows-x86_64-noconsole, exe: imanginablew.exe, suffix: ".exe", flags: "--no-console", cc: "-clang" }
           - { os: ubuntu-24.04,     key: linux-x86_64,   exe: imanginable,     suffix: "" }   # glibc ≥ 2.39: Ubuntu 24.04+, Debian 13+, Fedora 40+ (22.04 images cannot build Python 3.14 onefiles, see PYTHON)
           - { os: ubuntu-24.04-arm, key: linux-arm64,    exe: imanginable,     suffix: "" }   # Pi 4/5, ARM servers
           # The Linux rows are NOT on 26.04, deliberately: a binary needs at least the glibc
