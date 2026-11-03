@@ -1,0 +1,146 @@
+# Builds the Imanginable ANIMATION KIT from the PRIVATE source repo and publishes it. Same
+# arrangement as build.yml (the agent): the source is fetched with the read-only deploy
+# key and never leaves the runner; only the packed kits are uploaded.
+#
+# The kit is what draws animated shots and overlays on the person's computer: Node, the
+# HyperFrames renderer (Apache-2.0), chrome-headless-shell (Chromium, BSD + notices) and
+# Imanginable's own runtime (animkit/runtime). It is OPTIONAL and versioned on its own
+# (`kit` in animkit/lock.json), so a kit release never needs an agent release: agents
+# read dl.imanginable.com/kit/kit.json on every start.
+#
+# Trigger: `python animkit/release.py` in the private repo tags `kit-N` there and runs
+# this on main with kit=N, ref=kit-N, publish=true. Each platform's kit is built ON that
+# platform (npm brings its native pieces) and smoke-rendered there — a shot and a
+# transparent overlay through the agent's own render code — so a kit that does not
+# render, or loses its alpha, is never published.
+#
+# Where the files go: https://dl.imanginable.com/kit/ (the R2 bucket, fixed names, each
+# release REPLACES the last; the zips first, the signed index last) and a GitHub release
+# `kit-N` that is NEVER marked latest (the installers' fallback must stay the agent's).
+#
+# Secrets: SOURCE_DEPLOY_KEY, MINISIGN_SECRET_KEY, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY —
+# the same ones build.yml uses (see there).
+name: kit
+run-name: animation kit ${{ inputs.kit }}${{ !inputs.publish && ' (test, not published)' || '' }}
+on:
+  workflow_dispatch:
+    inputs:
+      kit: { description: "kit number (animkit/lock.json)", required: true }
+      ref: { description: "private-repo ref to build", default: "main" }
+      publish: { description: "publish it", type: boolean, default: false }
+
+permissions:
+  contents: write          # the release; nothing else
+
+concurrency:
+  group: kit-release       # never two kit publishes at once
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: Ikolvi/imanginable
+  DL_URL: https://dl.imanginable.com
+  R2_BUCKET: imanginable-agent
+  R2_ACCOUNT_ID: e09b6e290483127c3121bba67095241d
+  PYTHON: "3.14"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, key: windows-x86_64 }
+          - { os: ubuntu-24.04,   key: linux-x86_64 }
+          - { os: macos-26,       key: darwin-arm64 }
+          # No linux-arm64: Google publishes no chrome-headless-shell for it. Agents there
+          # report the kit as "not available on this computer".
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: the source (animkit/ and the agent's render code only)
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          sparse-checkout: |
+            animkit
+            agent
+      - uses: actions/setup-python@v7
+        with: { python-version: "${{ env.PYTHON }}", check-latest: true }
+      # npm for `npm install hyperframes` (the kit ships its own Node, from lock.json).
+      - uses: actions/setup-node@v7
+        with: { node-version: "lts/*" }
+      - run: pip install -q requests
+      - name: the kit number matches the lock
+        shell: bash
+        run: |
+          want="$(python -c "import json; print(json.load(open('animkit/lock.json'))['kit'])")"
+          if [ "$want" != "${{ inputs.kit }}" ]; then echo "::error::asked for kit ${{ inputs.kit }}, animkit/lock.json says $want"; exit 1; fi
+      - name: build + smoke render
+        shell: bash
+        run: python -u animkit/build_kit.py build --platform "${{ matrix.key }}" --out out --smoke
+      - uses: actions/upload-artifact@v7
+        with: { name: "kit-${{ matrix.key }}", path: out/*.zip, if-no-files-found: error, retention-days: 3 }
+
+  publish:
+    needs: build
+    if: inputs.publish
+    runs-on: ubuntu-26.04
+    steps:
+      - name: the source (index + signer)
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          sparse-checkout: |
+            animkit
+            agent/build/sign.py
+      - uses: actions/setup-python@v7
+        with: { python-version: "${{ env.PYTHON }}" }
+      - run: pip install -q requests cryptography
+      - uses: actions/download-artifact@v8
+        with: { path: out, pattern: "kit-*", merge-multiple: true }
+      - name: index + signature
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          python animkit/build_kit.py index --base "$DL_URL" --out out/kit.json out/kit-*.zip
+          python agent/build/sign.py sign out/kit.json
+          ls -la out
+      - name: release (never "latest")
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="kit-${{ inputs.kit }}"
+          notes="Imanginable animation kit ${{ inputs.kit }} — installed by the agent (Settings → Agent → Animation kit, or \`imanginable animkit install\`). Every zip's sha256 is in kit.json, which is signed (kit.json.minisig)."
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "Animation kit ${{ inputs.kit }}" --notes "$notes" --latest=false
+          for f in out/*; do
+            n=0
+            until gh release upload "$tag" "$f" --repo "$GITHUB_REPOSITORY" --clobber; do
+              n=$((n + 1)); if [ "$n" -ge 3 ]; then echo "giving up on $f"; exit 1; fi
+              echo "upload failed ($n), retrying in 15s: $f"; sleep 15
+            done
+          done
+      # The zips first, the index and its signature last, so the index never names a
+      # zip that is not there yet.
+      - name: publish to dl.imanginable.com/kit (R2)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          if [ -z "$AWS_ACCESS_KEY_ID" ]; then echo "::error::R2 secrets not set — $DL_URL/kit was not updated"; exit 1; fi
+          put() {  # put <file> <content-type>
+            aws s3 cp "out/$1" "s3://$R2_BUCKET/kit/$1" --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" \
+              --content-type "$2" --cache-control "public, max-age=300" --only-show-errors
+          }
+          for f in out/kit-*.zip; do put "$(basename "$f")" application/zip; done
+          put kit.json.minisig text/plain
+          put kit.json application/json
+          echo "published to $DL_URL/kit/"
