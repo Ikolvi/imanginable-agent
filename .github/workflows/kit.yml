@@ -56,7 +56,7 @@ jobs:
           # report the kit as "not available on this computer".
     runs-on: ${{ matrix.os }}
     steps:
-      - name: the source (animkit/ and the agent's render code only)
+      - name: the source (animkit/, the agent's render code, our animation helpers)
         uses: actions/checkout@v7
         with:
           repository: ${{ env.SOURCE_REPO }}
@@ -66,6 +66,7 @@ jobs:
           sparse-checkout: |
             animkit
             agent
+            veapp/animate
       - uses: actions/setup-python@v7
         with: { python-version: "${{ env.PYTHON }}", check-latest: true }
       # npm for `npm install hyperframes` (the kit ships its own Node, from lock.json).
