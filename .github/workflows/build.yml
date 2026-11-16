@@ -316,7 +316,9 @@ jobs:
           ref: ${{ needs.meta.outputs.ref }}
           ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
           persist-credentials: false
-          sparse-checkout: agent/build
+          sparse-checkout: |
+            agent/build
+            agent/notes
       - uses: actions/setup-python@v7
         with: { python-version: "${{ env.PYTHON }}" }
       - run: pip install -q cryptography
@@ -376,3 +378,9 @@ jobs:
           put manifest.json.minisig text/plain
           put manifest.json application/json
           echo "published $(ls builds | wc -l) files to $DL_URL"
+      # Last, once the files are live: the release notes to the Discord announcements
+      # channel (agent/build/announce.py in the source; no secret, nothing posted).
+      - name: announce on Discord
+        env:
+          DISCORD_ANNOUNCE_WEBHOOK: ${{ secrets.DISCORD_ANNOUNCE_WEBHOOK }}
+        run: python agent/build/announce.py "${{ needs.meta.outputs.version }}"
